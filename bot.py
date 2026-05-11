@@ -18,7 +18,7 @@ NAMES = ["Alexis", "FC"]
 
 def _next_saturday() -> date:
     today = date.today()
-    days = (5 - today.weekday()) % 7 or 7
+    days = (5 - today.weekday()) % 7  # 0 if today is already Saturday
     return today + timedelta(days=days)
 
 
@@ -109,6 +109,28 @@ async def monday_reset(context: ContextTypes.DEFAULT_TYPE):
     state["toilet_done"] = False
     state["toilet_this_weekend"] = False
     save_state(state)
+
+
+async def startup_check(context: ContextTypes.DEFAULT_TYPE):
+    today = date.today()
+    w = today.weekday()
+    if w not in (5, 6):
+        return
+
+    state = load_state()
+    this_sat = today if w == 5 else today - timedelta(days=1)
+    next_toilet = date.fromisoformat(state["next_toilet_saturday"])
+
+    if this_sat >= next_toilet and not state["toilet_this_weekend"]:
+        toilet_person = NAMES[state["toilet_turn"]]
+        state["toilet_done"] = False
+        state["toilet_this_weekend"] = True
+        save_state(state)
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"🚽 Toilet cleaning reminder!\n\n{toilet_person}, it's your turn to scrub the toilet!",
+            reply_markup=_done_keyboard("toilet"),
+        )
 
 
 # ── Shared status builder ─────────────────────────────────────────────────────
@@ -267,6 +289,7 @@ def main():
     jq.run_daily(saturday_job, time=time(9, 0, tzinfo=TZ), days=(5,))
     jq.run_daily(sunday_job,   time=time(9, 0, tzinfo=TZ), days=(6,))
     jq.run_daily(monday_reset, time=time(7, 0, tzinfo=TZ), days=(0,))
+    jq.run_once(startup_check, when=5)
 
     print("Chore bot running. Press Ctrl+C to stop.")
     app.run_polling()
