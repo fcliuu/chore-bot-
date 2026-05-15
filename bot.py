@@ -7,33 +7,53 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 BOT_TOKEN = "8756258315:AAH0caCOy4MQkG-jUMdPMmeyoJv9k0GeQjY"
-CHAT_ID = 607826841
+CHAT_ID = 4985901416
 TZ = ZoneInfo("Asia/Singapore")
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
-# Index 0 = Alexis, index 1 = FC
-NAMES = ["Alexis", "FC"]
+NAMES = ["Alexis", "FC"]          # index 0 = Alexis, index 1 = FC
+MOPPING_BASE = date(2026, 5, 9)   # week 0: Alexis mops
+TOILET_BASE  = date(2026, 5, 9)   # toilet weekend 0: FC cleans
 
 
-def _next_saturday() -> date:
+# ── Schedule helpers (calculated from fixed base dates, no state needed) ──────
+
+def _mopping_person(saturday: date) -> str:
+    weeks = (saturday - MOPPING_BASE).days // 7
+    return NAMES[weeks % 2]
+
+
+def _is_toilet_weekend(saturday: date) -> bool:
+    delta = (saturday - TOILET_BASE).days
+    return delta >= 0 and delta % 14 == 0
+
+
+def _toilet_person(saturday: date) -> str:
+    delta = (saturday - TOILET_BASE).days
+    nth = delta // 14
+    return NAMES[(nth + 1) % 2]  # nth=0→FC, nth=1→Alexis, ...
+
+
+def _this_saturday() -> date:
     today = date.today()
-    days = (5 - today.weekday()) % 7  # 0 if today is already Saturday
-    return today + timedelta(days=days)
+    w = today.weekday()
+    if w == 6:
+        return today - timedelta(days=1)
+    return today + timedelta(days=(5 - w) % 7)
 
 
 def _fmt(d: date) -> str:
     return f"{d.day} {d.strftime('%b')}"
 
 
+# ── State (only tracks done flags and last reminder date) ─────────────────────
+
 def load_state() -> dict:
     defaults = {
-        "next_toilet_saturday": _next_saturday().isoformat(),
         "mopping_done": False,
         "toilet_done": False,
-        "toilet_this_weekend": False,
-        "mopping_turn": 0,   # Alexis mops first
-        "toilet_turn": 1,    # FC cleans toilet first
+        "last_reminder_sat": None,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -54,23 +74,22 @@ def _done_keyboard(chore: str) -> InlineKeyboardMarkup:
 # ── Scheduled jobs ────────────────────────────────────────────────────────────
 
 async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
+    today = date.today()
     state = load_state()
     state["mopping_done"] = False
+    state["toilet_done"] = False
+    state["last_reminder_sat"] = today.isoformat()
     save_state(state)
 
-    mop_person = NAMES[state["mopping_turn"]]
+    mop_person = _mopping_person(today)
     await context.bot.send_message(
         chat_id=CHAT_ID,
         text=f"🧹 Weekend chore reminder!\n\n{mop_person}, it's your turn to mop the floor!",
         reply_markup=_done_keyboard("mopping"),
     )
 
-    today = date.today()
-    if today >= date.fromisoformat(state["next_toilet_saturday"]):
-        toilet_person = NAMES[state["toilet_turn"]]
-        state["toilet_done"] = False
-        state["toilet_this_weekend"] = True
-        save_state(state)
+    if _is_toilet_weekend(today):
+        toilet_person = _toilet_person(today)
         await context.bot.send_message(
             chat_id=CHAT_ID,
             text=f"🚽 Toilet cleaning week too!\n\n{toilet_person}, it's your turn to scrub the toilet!",
@@ -79,18 +98,19 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
+    this_sat = date.today() - timedelta(days=1)
     state = load_state()
 
     if not state["mopping_done"]:
-        mop_person = NAMES[state["mopping_turn"]]
+        mop_person = _mopping_person(this_sat)
         await context.bot.send_message(
             chat_id=CHAT_ID,
             text=f"⚠️ Mopping still not done! {mop_person}, last chance today 🧹",
             reply_markup=_done_keyboard("mopping"),
         )
 
-    if state["toilet_this_weekend"] and not state["toilet_done"]:
-        toilet_person = NAMES[state["toilet_turn"]]
+    if _is_toilet_weekend(this_sat) and not state["toilet_done"]:
+        toilet_person = _toilet_person(this_sat)
         await context.bot.send_message(
             chat_id=CHAT_ID,
             text=f"⚠️ Toilet still not done! {toilet_person}, last chance today 🚽",
@@ -98,16 +118,10 @@ async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def monday_reset(context: ContextTypes.DEFAULT_TYPE):
+async def monday_reset(_context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    if state["toilet_this_weekend"]:
-        last_sat = date.fromisoformat(state["next_toilet_saturday"])
-        state["next_toilet_saturday"] = (last_sat + timedelta(weeks=2)).isoformat()
-        state["toilet_turn"] = 1 - state["toilet_turn"]
-    state["mopping_turn"] = 1 - state["mopping_turn"]
     state["mopping_done"] = False
     state["toilet_done"] = False
-    state["toilet_this_weekend"] = False
     save_state(state)
 
 
@@ -117,49 +131,45 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
     if w not in (5, 6):
         return
 
-    state = load_state()
     this_sat = today if w == 5 else today - timedelta(days=1)
-    next_toilet = date.fromisoformat(state["next_toilet_saturday"])
+    if not _is_toilet_weekend(this_sat):
+        return
 
-    if this_sat >= next_toilet and not state["toilet_this_weekend"]:
-        toilet_person = NAMES[state["toilet_turn"]]
-        state["toilet_done"] = False
-        state["toilet_this_weekend"] = True
-        save_state(state)
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"🚽 Toilet cleaning reminder!\n\n{toilet_person}, it's your turn to scrub the toilet!",
-            reply_markup=_done_keyboard("toilet"),
-        )
+    state = load_state()
+    if state.get("last_reminder_sat") == this_sat.isoformat():
+        return  # reminder already sent for this Saturday
+
+    toilet_person = _toilet_person(this_sat)
+    state["last_reminder_sat"] = this_sat.isoformat()
+    save_state(state)
+    await context.bot.send_message(
+        chat_id=CHAT_ID,
+        text=f"🚽 Toilet cleaning reminder!\n\n{toilet_person}, it's your turn to scrub the toilet!",
+        reply_markup=_done_keyboard("toilet"),
+    )
 
 
 # ── Shared status builder ─────────────────────────────────────────────────────
 
 def _build_status(state: dict) -> tuple:
-    today = date.today()
-    w = today.weekday()
-
-    if w == 6:
-        this_sat = today - timedelta(days=1)
-    elif w == 5:
-        this_sat = today
-    else:
-        this_sat = today + timedelta(days=5 - w)
-
-    next_toilet_sat = date.fromisoformat(state["next_toilet_saturday"])
-    mop_person = NAMES[state["mopping_turn"]]
-    toilet_person = NAMES[state["toilet_turn"]]
-    is_weekend = w >= 5
+    this_sat = _this_saturday()
+    mop_person = _mopping_person(this_sat)
+    toilet_this_wknd = _is_toilet_weekend(this_sat)
 
     mop_status = "✅ Done" if state["mopping_done"] else "❌ Not done yet"
 
-    toilet_this_wknd = state["toilet_this_weekend"] if is_weekend else (this_sat == next_toilet_sat)
     if toilet_this_wknd:
         toilet_status = "✅ Done" if state["toilet_done"] else "❌ Not done yet"
+        toilet_person = _toilet_person(this_sat)
         toilet_date = this_sat
     else:
         toilet_status = "⏳ Not this weekend"
-        toilet_date = next_toilet_sat
+        # find next toilet Saturday
+        next_toilet = this_sat + timedelta(weeks=1)
+        while not _is_toilet_weekend(next_toilet):
+            next_toilet += timedelta(weeks=1)
+        toilet_person = _toilet_person(next_toilet)
+        toilet_date = next_toilet
 
     lines = [
         "📋 Chore Status\n",
@@ -172,29 +182,17 @@ def _build_status(state: dict) -> tuple:
         "📅 Upcoming schedule",
     ]
 
-    sched_start = this_sat + timedelta(weeks=1)
-    mop_idx = 1 - state["mopping_turn"]
-
-    if toilet_this_wknd:
-        t_next_sat = next_toilet_sat + timedelta(weeks=2)
-        t_idx = 1 - state["toilet_turn"]
-    else:
-        t_next_sat = next_toilet_sat
-        t_idx = state["toilet_turn"]
-
-    for i in range(5):
-        sat = sched_start + timedelta(weeks=i)
+    for i in range(1, 6):
+        sat = this_sat + timedelta(weeks=i)
         sun = sat + timedelta(days=1)
-        m = NAMES[(mop_idx + i) % 2]
-        if sat >= t_next_sat and (sat - t_next_sat).days % 14 == 0:
-            chore_str = f"🧹 Mop ({m}) + 🚽 Toilet ({NAMES[t_idx]})"
-            t_idx = 1 - t_idx
+        m = _mopping_person(sat)
+        if _is_toilet_weekend(sat):
+            chore_str = f"🧹 Mop ({m}) + 🚽 Toilet ({_toilet_person(sat)})"
         else:
             chore_str = f"🧹 Mop ({m})"
         lines.append(f"• {_fmt(sat)}-{_fmt(sun)}: {chore_str}")
 
-    row1 = []
-    row2 = []
+    row1, row2 = [], []
     if not state["mopping_done"]:
         row1.append(InlineKeyboardButton("✅ Mopping done!", callback_data="update_done_mopping"))
     else:
@@ -209,7 +207,7 @@ def _build_status(state: dict) -> tuple:
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
-# ── Callback: Done button ─────────────────────────────────────────────────────
+# ── Callback: Done / Undo buttons ─────────────────────────────────────────────
 
 async def done_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
