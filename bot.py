@@ -107,7 +107,6 @@ def load_state() -> dict:
         "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
         "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
         "last_reminder_sat": None,
-        "pinned_message_id": None,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -211,44 +210,6 @@ def _build_chore_detail(chore: str, state: dict) -> tuple:
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
-# ── Pinned dashboard helpers ──────────────────────────────────────────────────
-
-async def _update_pinned_dashboard(context, state: dict):
-    """Silently edit the existing pinned dashboard message in place."""
-    msg_id = state.get("pinned_message_id")
-    if not msg_id:
-        return
-    try:
-        text, markup = _build_main_menu(state)
-        await context.bot.edit_message_text(
-            chat_id=CHAT_ID, message_id=msg_id, text=text, reply_markup=markup,
-        )
-    except Exception as e:
-        logger.warning("Could not update pinned dashboard: %s", e)
-
-
-async def _send_and_pin_dashboard(context, state: dict):
-    """Send a fresh dashboard message to the group and pin it."""
-    old_id = state.get("pinned_message_id")
-    if old_id:
-        try:
-            await context.bot.unpin_chat_message(chat_id=CHAT_ID, message_id=old_id)
-        except Exception:
-            pass
-
-    text, markup = _build_main_menu(state)
-    msg = await context.bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=markup)
-    try:
-        await context.bot.pin_chat_message(
-            chat_id=CHAT_ID, message_id=msg.message_id, disable_notification=True,
-        )
-    except Exception as e:
-        logger.warning("Could not pin dashboard: %s", e)
-
-    state["pinned_message_id"] = msg.message_id
-    save_state(state)
-
-
 # ── Weekend reminder sender ───────────────────────────────────────────────────
 
 async def _send_weekend_reminders(context, saturday: date):
@@ -276,7 +237,6 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
         state[f"{chore}_lapsed"] = False
     state["last_reminder_sat"] = today.isoformat()
     save_state(state)
-    await _send_and_pin_dashboard(context, state)
     await _send_weekend_reminders(context, today)
 
 
@@ -328,13 +288,12 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
     w = today.weekday()
     logger.info("startup_check running, today=%s weekday=%d", today, w)
 
-    # On weekdays, re-send lapse reminders and refresh pinned dashboard
+    # On weekdays, just re-send lapse reminders if any chores are overdue
     if w not in (5, 6):
         state = load_state()
         if any(state.get(f"{c}_lapsed") for c in ALL_CHORES):
             logger.info("startup_check: lapsed chores found, sending reminders")
             await weekday_job(context)
-        await _update_pinned_dashboard(context, state)
         return
 
     this_sat = today if w == 5 else today - timedelta(days=1)
@@ -350,20 +309,18 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
         state[f"{chore}_lapsed"] = False
     state["last_reminder_sat"] = this_sat.isoformat()
     save_state(state)
-    await _send_and_pin_dashboard(context, state)
     await _send_weekend_reminders(context, this_sat)
 
 
 # ── Callback handler ──────────────────────────────────────────────────────────
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     state = load_state()
     name = update.effective_user.first_name
     today = date.today()
-    is_pinned = query.message.message_id == state.get("pinned_message_id")
 
     # ── Navigation ────────────────────────────────────────────────────────────
     if data.startswith("menu_"):
@@ -413,9 +370,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, markup = _build_chore_detail(chore, state)
             await query.edit_message_text(text, reply_markup=markup)
 
-        if not is_pinned:
-            await _update_pinned_dashboard(context, state)
-
     # ── Undo ──────────────────────────────────────────────────────────────────
     elif action == "undo":
         state[done_key] = False
@@ -439,9 +393,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=_done_keyboard(chore),
             )
 
-        if not is_pinned:
-            await _update_pinned_dashboard(context, state)
-
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -452,21 +403,10 @@ async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    old_id = state.get("pinned_message_id")
-    if old_id:
-        try:
-            text, markup = _build_main_menu(state)
-            await context.bot.edit_message_text(
-                chat_id=CHAT_ID, message_id=old_id, text=text, reply_markup=markup,
-            )
-            await update.message.reply_text("Dashboard refreshed! Check the pinned message ☝️")
-            return
-        except Exception:
-            pass
-    await _send_and_pin_dashboard(context, state)
-    await update.message.reply_text("Dashboard pinned to the group! ☝️")
+    text, markup = _build_main_menu(state)
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 async def cmd_mopping(update: Update, _context: ContextTypes.DEFAULT_TYPE):
