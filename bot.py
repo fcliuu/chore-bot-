@@ -1,10 +1,14 @@
 import json
+import logging
 import os
 from datetime import date, timedelta, time
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8756258315:AAH0caCOy4MQkG-jUMdPMmeyoJv9k0GeQjY"
 CHAT_ID = 4985901416
@@ -12,12 +16,16 @@ TZ = ZoneInfo("Asia/Singapore")
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
 
-NAMES = ["Alexis", "FC"]          # index 0 = Alexis, index 1 = FC
-MOPPING_BASE = date(2026, 5, 9)   # week 0: Alexis mops
-TOILET_BASE  = date(2026, 5, 9)   # toilet weekend 0: FC cleans
+NAMES = ["Alexis", "FC"]
+MOPPING_BASE   = date(2026, 5, 9)   # week 0: Alexis mops
+TOILET_BASE    = date(2026, 5, 9)   # biweek 0: FC cleans toilet
+BEDSHEETS_BASE = date(2026, 5, 16)  # biweek 0: Alexis washes bedsheets
+
+CHORE_EMOJI = {"mopping": "🧹", "toilet": "🚽", "bedsheets": "🛏"}
+ALL_CHORES = ("mopping", "toilet", "bedsheets")
 
 
-# ── Schedule helpers (calculated from fixed base dates, no state needed) ──────
+# ── Schedule helpers ──────────────────────────────────────────────────────────
 
 def _mopping_person(saturday: date) -> str:
     weeks = (saturday - MOPPING_BASE).days // 7
@@ -30,9 +38,18 @@ def _is_toilet_weekend(saturday: date) -> bool:
 
 
 def _toilet_person(saturday: date) -> str:
-    delta = (saturday - TOILET_BASE).days
-    nth = delta // 14
-    return NAMES[(nth + 1) % 2]  # nth=0→FC, nth=1→Alexis, ...
+    nth = (saturday - TOILET_BASE).days // 14
+    return NAMES[(nth + 1) % 2]  # biweek 0 → FC, biweek 1 → Alexis
+
+
+def _is_bedsheets_weekend(saturday: date) -> bool:
+    delta = (saturday - BEDSHEETS_BASE).days
+    return delta >= 0 and delta % 14 == 0
+
+
+def _bedsheets_person(saturday: date) -> str:
+    nth = (saturday - BEDSHEETS_BASE).days // 14
+    return NAMES[nth % 2]  # biweek 0 → Alexis, biweek 1 → FC
 
 
 def _this_saturday() -> date:
@@ -43,16 +60,53 @@ def _this_saturday() -> date:
     return today + timedelta(days=(5 - w) % 7)
 
 
+def _last_saturday() -> date:
+    today = date.today()
+    w = today.weekday()
+    return today - timedelta(days=(w - 5) % 7)
+
+
 def _fmt(d: date) -> str:
     return f"{d.day} {d.strftime('%b')}"
 
 
-# ── State (only tracks done flags and last reminder date) ─────────────────────
+def _is_chore_weekend(chore: str, saturday: date) -> bool:
+    if chore == "mopping":
+        return True
+    if chore == "toilet":
+        return _is_toilet_weekend(saturday)
+    if chore == "bedsheets":
+        return _is_bedsheets_weekend(saturday)
+    return False
+
+
+def _chore_person(chore: str, saturday: date) -> str:
+    if chore == "mopping":
+        return _mopping_person(saturday)
+    if chore == "toilet":
+        return _toilet_person(saturday)
+    if chore == "bedsheets":
+        return _bedsheets_person(saturday)
+    return "?"
+
+
+def _lapsed_person(chore: str) -> str:
+    """Person responsible for a lapsed chore — looks back to last due Saturday."""
+    sat = _last_saturday()
+    if chore == "mopping":
+        return _mopping_person(sat)
+    # For biweekly chores, go back to the most recent due Saturday
+    while not _is_chore_weekend(chore, sat):
+        sat -= timedelta(weeks=1)
+    return _chore_person(chore, sat)
+
+
+# ── State ─────────────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     defaults = {
-        "mopping_done": False,
-        "toilet_done": False,
+        "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
+        "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
         "last_reminder_sat": None,
     }
     if os.path.exists(STATE_FILE):
@@ -67,229 +121,355 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
 
 
+# ── Message builders ──────────────────────────────────────────────────────────
+
 def _done_keyboard(chore: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done!", callback_data=f"done_{chore}")]])
+
+
+def _build_main_menu(state: dict) -> tuple:
+    this_sat = _this_saturday()
+    lines = ["📋 Chore Dashboard\n"]
+
+    for chore in ALL_CHORES:
+        emoji = CHORE_EMOJI[chore]
+        if state.get(f"{chore}_lapsed"):
+            person = _lapsed_person(chore)
+            lines.append(f"{emoji} {chore.title()}: ⚠️ OVERDUE ({person})")
+        elif _is_chore_weekend(chore, this_sat):
+            person = _chore_person(chore, this_sat)
+            done = state[f"{chore}_done"]
+            status = "✅ Done" if done else "❌ Pending"
+            lines.append(f"{emoji} {chore.title()}: {status} ({person}, Sat {_fmt(this_sat)})")
+        else:
+            next_sat = this_sat + timedelta(weeks=1)
+            while not _is_chore_weekend(chore, next_sat):
+                next_sat += timedelta(weeks=1)
+            person = _chore_person(chore, next_sat)
+            lines.append(f"{emoji} {chore.title()}: ⏳ Next Sat {_fmt(next_sat)} ({person})")
+
+    lines.append("\nTap a chore for details:")
+    text = "\n".join(lines)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹 Mopping", callback_data="menu_mopping")],
+        [InlineKeyboardButton("🚽 Toilet", callback_data="menu_toilet")],
+        [InlineKeyboardButton("🛏 Bedsheets", callback_data="menu_bedsheets")],
+    ])
+    return text, keyboard
+
+
+def _build_chore_detail(chore: str, state: dict) -> tuple:
+    this_sat = _this_saturday()
+    emoji = CHORE_EMOJI[chore]
+    freq = "every weekend" if chore == "mopping" else "every 2 weeks"
+    lines = [f"{emoji} {chore.title()}", f"Schedule: {freq}", ""]
+
+    # Upcoming 4-week schedule
+    lines.append("📅 Upcoming:")
+    for i in range(5):
+        sat = this_sat + timedelta(weeks=i)
+        if _is_chore_weekend(chore, sat):
+            person = _chore_person(chore, sat)
+            marker = " ← this weekend" if i == 0 else ""
+            lines.append(f"  • Sat {_fmt(sat)}: {person}{marker}")
+
+    lines.append("")
+
+    # Current status
+    done = state[f"{chore}_done"]
+    lapsed = state.get(f"{chore}_lapsed")
+
+    if lapsed:
+        person = _lapsed_person(chore)
+        lines.append(f"⚠️ OVERDUE from last weekend — {person}, please do it ASAP!")
+        buttons = [
+            [InlineKeyboardButton("✅ Done! (clear overdue)", callback_data=f"update_done_{chore}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")],
+        ]
+    elif _is_chore_weekend(chore, this_sat):
+        person = _chore_person(chore, this_sat)
+        status = "✅ Done this weekend!" if done else f"❌ Not done yet — {person}'s turn"
+        lines.append(f"This weekend: {status}")
+        if done:
+            buttons = [
+                [InlineKeyboardButton("↩️ Undo", callback_data=f"undo_{chore}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")],
+            ]
+        else:
+            buttons = [
+                [InlineKeyboardButton("✅ Mark Done", callback_data=f"update_done_{chore}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")],
+            ]
+    else:
+        next_sat = this_sat + timedelta(weeks=1)
+        while not _is_chore_weekend(chore, next_sat):
+            next_sat += timedelta(weeks=1)
+        person = _chore_person(chore, next_sat)
+        lines.append(f"Not this weekend — next up: Sat {_fmt(next_sat)}, {person}'s turn")
+        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]]
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+# ── Weekend reminder sender ───────────────────────────────────────────────────
+
+async def _send_weekend_reminders(context, saturday: date):
+    for chore in ALL_CHORES:
+        if not _is_chore_weekend(chore, saturday):
+            continue
+        person = _chore_person(chore, saturday)
+        emoji = CHORE_EMOJI[chore]
+        label = chore.title()
+        await context.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"{emoji} Weekend chore reminder!\n\n{person}, it's your turn to do {label}!",
+            reply_markup=_done_keyboard(chore),
+        )
 
 
 # ── Scheduled jobs ────────────────────────────────────────────────────────────
 
 async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
     today = date.today()
+    logger.info("saturday_job running for %s", today)
     state = load_state()
-    state["mopping_done"] = False
-    state["toilet_done"] = False
+    for chore in ALL_CHORES:
+        state[f"{chore}_done"] = False
+        state[f"{chore}_lapsed"] = False
     state["last_reminder_sat"] = today.isoformat()
     save_state(state)
-
-    mop_person = _mopping_person(today)
-    await context.bot.send_message(
-        chat_id=CHAT_ID,
-        text=f"🧹 Weekend chore reminder!\n\n{mop_person}, it's your turn to mop the floor!",
-        reply_markup=_done_keyboard("mopping"),
-    )
-
-    if _is_toilet_weekend(today):
-        toilet_person = _toilet_person(today)
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"🚽 Toilet cleaning week too!\n\n{toilet_person}, it's your turn to scrub the toilet!",
-            reply_markup=_done_keyboard("toilet"),
-        )
+    await _send_weekend_reminders(context, today)
 
 
 async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
     this_sat = date.today() - timedelta(days=1)
+    logger.info("sunday_job running, this_sat=%s", this_sat)
+    state = load_state()
+    for chore in ALL_CHORES:
+        if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
+            person = _chore_person(chore, this_sat)
+            emoji = CHORE_EMOJI[chore]
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"⚠️ {chore.title()} still not done! {person}, last chance today {emoji}",
+                reply_markup=_done_keyboard(chore),
+            )
+
+
+async def monday_lapse(context: ContextTypes.DEFAULT_TYPE):
+    """Auto-lapse any chores that weren't done last weekend, then reset done flags."""
+    this_sat = date.today() - timedelta(days=2)  # Monday − 2 days = Saturday
+    logger.info("monday_lapse running, this_sat=%s", this_sat)
     state = load_state()
 
-    if not state["mopping_done"]:
-        mop_person = _mopping_person(this_sat)
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"⚠️ Mopping still not done! {mop_person}, last chance today 🧹",
-            reply_markup=_done_keyboard("mopping"),
-        )
+    for chore in ALL_CHORES:
+        if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
+            state[f"{chore}_lapsed"] = True
+            person = _chore_person(chore, this_sat)
+            emoji = CHORE_EMOJI[chore]
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"{emoji} {chore.title()} from last weekend was never done!\n\n{person}, please do it ASAP!",
+                reply_markup=_done_keyboard(chore),
+            )
 
-    if _is_toilet_weekend(this_sat) and not state["toilet_done"]:
-        toilet_person = _toilet_person(this_sat)
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"⚠️ Toilet still not done! {toilet_person}, last chance today 🚽",
-            reply_markup=_done_keyboard("toilet"),
-        )
-
-
-async def monday_reset(_context: ContextTypes.DEFAULT_TYPE):
-    state = load_state()
-    state["mopping_done"] = False
-    state["toilet_done"] = False
+    for chore in ALL_CHORES:
+        state[f"{chore}_done"] = False
     save_state(state)
+
+
+async def daily_lapse_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Send daily reminders Tue–Fri for any lapsed chores."""
+    logger.info("daily_lapse_reminder running on %s", date.today())
+    state = load_state()
+    for chore in ALL_CHORES:
+        if state.get(f"{chore}_lapsed"):
+            person = _lapsed_person(chore)
+            emoji = CHORE_EMOJI[chore]
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"{emoji} Reminder: {chore.title()} still not done!\n\n{person}, please get it done today!",
+                reply_markup=_done_keyboard(chore),
+            )
 
 
 async def startup_check(context: ContextTypes.DEFAULT_TYPE):
     today = date.today()
     w = today.weekday()
+    logger.info("startup_check running, today=%s weekday=%d", today, w)
+
+    # On weekdays, just re-send lapse reminders if any chores are overdue
     if w not in (5, 6):
+        state = load_state()
+        if any(state.get(f"{c}_lapsed") for c in ALL_CHORES):
+            logger.info("startup_check: lapsed chores found, sending reminders")
+            await daily_lapse_reminder(context)
         return
 
     this_sat = today if w == 5 else today - timedelta(days=1)
-    if not _is_toilet_weekend(this_sat):
+    state = load_state()
+
+    if state.get("last_reminder_sat") == this_sat.isoformat():
+        logger.info("startup_check: reminders already sent for %s", this_sat)
         return
 
-    state = load_state()
-    if state.get("last_reminder_sat") == this_sat.isoformat():
-        return  # reminder already sent for this Saturday
-
-    toilet_person = _toilet_person(this_sat)
+    logger.info("startup_check: sending missed weekend reminders for %s", this_sat)
+    for chore in ALL_CHORES:
+        state[f"{chore}_done"] = False
+        state[f"{chore}_lapsed"] = False
     state["last_reminder_sat"] = this_sat.isoformat()
     save_state(state)
-    await context.bot.send_message(
-        chat_id=CHAT_ID,
-        text=f"🚽 Toilet cleaning reminder!\n\n{toilet_person}, it's your turn to scrub the toilet!",
-        reply_markup=_done_keyboard("toilet"),
-    )
+    await _send_weekend_reminders(context, this_sat)
 
 
-# ── Shared status builder ─────────────────────────────────────────────────────
+# ── Callback handler ──────────────────────────────────────────────────────────
 
-def _build_status(state: dict) -> tuple:
-    this_sat = _this_saturday()
-    mop_person = _mopping_person(this_sat)
-    toilet_this_wknd = _is_toilet_weekend(this_sat)
-
-    mop_status = "✅ Done" if state["mopping_done"] else "❌ Not done yet"
-
-    if toilet_this_wknd:
-        toilet_status = "✅ Done" if state["toilet_done"] else "❌ Not done yet"
-        toilet_person = _toilet_person(this_sat)
-        toilet_date = this_sat
-    else:
-        toilet_status = "⏳ Not this weekend"
-        # find next toilet Saturday
-        next_toilet = this_sat + timedelta(weeks=1)
-        while not _is_toilet_weekend(next_toilet):
-            next_toilet += timedelta(weeks=1)
-        toilet_person = _toilet_person(next_toilet)
-        toilet_date = next_toilet
-
-    lines = [
-        "📋 Chore Status\n",
-        f"🧹 Mopping: {mop_status}",
-        f"   (Sat {_fmt(this_sat)}, {mop_person}'s turn)",
-        "",
-        f"🚽 Toilet: {toilet_status}",
-        f"   (Sat {_fmt(toilet_date)}, {toilet_person}'s turn)",
-        "",
-        "📅 Upcoming schedule",
-    ]
-
-    for i in range(1, 6):
-        sat = this_sat + timedelta(weeks=i)
-        sun = sat + timedelta(days=1)
-        m = _mopping_person(sat)
-        if _is_toilet_weekend(sat):
-            chore_str = f"🧹 Mop ({m}) + 🚽 Toilet ({_toilet_person(sat)})"
-        else:
-            chore_str = f"🧹 Mop ({m})"
-        lines.append(f"• {_fmt(sat)}-{_fmt(sun)}: {chore_str}")
-
-    row1, row2 = [], []
-    if not state["mopping_done"]:
-        row1.append(InlineKeyboardButton("✅ Mopping done!", callback_data="update_done_mopping"))
-    else:
-        row1.append(InlineKeyboardButton("↩️ Undo mopping", callback_data="undo_mopping"))
-    if toilet_this_wknd:
-        if not state["toilet_done"]:
-            row2.append(InlineKeyboardButton("✅ Toilet done!", callback_data="update_done_toilet"))
-        else:
-            row2.append(InlineKeyboardButton("↩️ Undo toilet", callback_data="undo_toilet"))
-
-    keyboard = [row1] + ([row2] if row2 else [])
-    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
-
-
-# ── Callback: Done / Undo buttons ─────────────────────────────────────────────
-
-async def done_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
+    data = query.data
     state = load_state()
     name = update.effective_user.first_name
-    data = query.data
+    today = date.today()
 
-    if data in ("done_mopping", "update_done_mopping"):
-        if state["mopping_done"]:
-            await query.answer("Already marked done!")
-            return
-        state["mopping_done"] = True
-        save_state(state)
-        await query.answer("Mopping marked done!")
-
-    elif data in ("done_toilet", "update_done_toilet"):
-        if state["toilet_done"]:
-            await query.answer("Already marked done!")
-            return
-        state["toilet_done"] = True
-        save_state(state)
-        await query.answer("Toilet marked done!")
-
-    elif data == "undo_mopping":
-        state["mopping_done"] = False
-        save_state(state)
-        await query.answer("Mopping unmarked!")
-
-    elif data == "undo_toilet":
-        state["toilet_done"] = False
-        save_state(state)
-        await query.answer("Toilet unmarked!")
-
-    else:
+    # ── Navigation ────────────────────────────────────────────────────────────
+    if data.startswith("menu_"):
+        chore = data[5:]
+        if chore == "main":
+            text, markup = _build_main_menu(state)
+        else:
+            text, markup = _build_chore_detail(chore, state)
+        await query.edit_message_text(text, reply_markup=markup)
         return
 
-    if data.startswith("update_") or data.startswith("undo_"):
-        text, markup = _build_status(state)
-        await query.edit_message_text(text, reply_markup=markup)
-    else:
-        await query.edit_message_text(f"✅ Thanks {name}! 🎉")
+    # ── Parse action + chore ──────────────────────────────────────────────────
+    chore = action = None
+    for prefix in ("update_done_", "done_", "undo_"):
+        if data.startswith(prefix):
+            chore = data[len(prefix):]
+            action = prefix.rstrip("_")
+            break
+
+    if chore not in ALL_CHORES:
+        return
+
+    done_key    = f"{chore}_done"
+    lapsed_key  = f"{chore}_lapsed"
+    emoji       = CHORE_EMOJI[chore]
+
+    # ── Mark done ─────────────────────────────────────────────────────────────
+    if action in ("done", "update_done"):
+        if state[done_key] and not state.get(lapsed_key):
+            await query.answer("Already marked done!")
+            return
+        state[done_key]   = True
+        state[lapsed_key] = False
+        save_state(state)
+
+        if action == "done":
+            # From a reminder message → show thanks + undo button
+            undo_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("↩️ Undo", callback_data=f"undo_{chore}")
+            ]])
+            await query.edit_message_text(
+                f"✅ Thanks {name}! {emoji} {chore.title()} done! 🎉",
+                reply_markup=undo_markup,
+            )
+        else:
+            # From status/detail → refresh detail view
+            text, markup = _build_chore_detail(chore, state)
+            await query.edit_message_text(text, reply_markup=markup)
+
+    # ── Undo ──────────────────────────────────────────────────────────────────
+    elif action == "undo":
+        state[done_key] = False
+        w = today.weekday()
+
+        if w == 5:  # Saturday: just warn
+            save_state(state)
+            person = _chore_person(chore, today)
+            await query.edit_message_text(
+                f"⚠️ {emoji} {chore.title()} unmarked.\n\n"
+                f"{person}, please get it done before Sunday! ⏰",
+                reply_markup=_done_keyboard(chore),
+            )
+        else:  # Sunday or weekday: lapse
+            state[lapsed_key] = True
+            save_state(state)
+            person = _lapsed_person(chore)
+            await query.edit_message_text(
+                f"⚠️ {emoji} {chore.title()} lapsed!\n\n"
+                f"{person}, you'll get daily reminders until it's done.",
+                reply_markup=_done_keyboard(chore),
+            )
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"👋 Chore bot is running!\n"
-        f"Chat ID: {update.effective_chat.id}\n\n"
-        f"Use /status to see chore status and upcoming schedule.",
+        "👋 Chore bot is running!\n\nUse /status to see all chores, "
+        "or use /mopping, /toilet, /bedsheets for individual chore details."
     )
 
 
 async def status(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    text, markup = _build_status(state)
+    text, markup = _build_main_menu(state)
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def update_chores(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def cmd_mopping(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    text, markup = _build_status(state)
+    text, markup = _build_chore_detail("mopping", state)
     await update.message.reply_text(text, reply_markup=markup)
+
+
+async def cmd_toilet(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    state = load_state()
+    text, markup = _build_chore_detail("toilet", state)
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+async def cmd_bedsheets(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    state = load_state()
+    text, markup = _build_chore_detail("bedsheets", state)
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+# ── Bot setup ─────────────────────────────────────────────────────────────────
+
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        BotCommand("status",    "View all chores dashboard"),
+        BotCommand("mopping",   "Mopping schedule and status"),
+        BotCommand("toilet",    "Toilet cleaning schedule and status"),
+        BotCommand("bedsheets", "Bedsheets schedule and status"),
+    ])
+    logger.info("Bot commands menu set.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("update", update_chores))
-    app.add_handler(CallbackQueryHandler(done_callback))
+    app.add_handler(CommandHandler("start",     start))
+    app.add_handler(CommandHandler("status",    status))
+    app.add_handler(CommandHandler("mopping",   cmd_mopping))
+    app.add_handler(CommandHandler("toilet",    cmd_toilet))
+    app.add_handler(CommandHandler("bedsheets", cmd_bedsheets))
+    app.add_handler(CallbackQueryHandler(callback_handler))
 
     jq = app.job_queue
-    jq.run_daily(saturday_job, time=time(9, 0, tzinfo=TZ), days=(5,))
-    jq.run_daily(sunday_job,   time=time(9, 0, tzinfo=TZ), days=(6,))
-    jq.run_daily(monday_reset, time=time(7, 0, tzinfo=TZ), days=(0,))
+    # days: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun  (python-telegram-bot convention)
+    jq.run_daily(saturday_job,         time=time(9,  0, tzinfo=TZ), days=(5,))
+    jq.run_daily(sunday_job,           time=time(9,  0, tzinfo=TZ), days=(6,))
+    jq.run_daily(monday_lapse,         time=time(7,  0, tzinfo=TZ), days=(0,))
+    jq.run_daily(daily_lapse_reminder, time=time(10, 0, tzinfo=TZ), days=(1, 2, 3, 4))
     jq.run_once(startup_check, when=5)
 
-    print("Chore bot running. Press Ctrl+C to stop.")
+    logger.info("Chore bot starting...")
     app.run_polling()
 
 
