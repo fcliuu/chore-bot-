@@ -255,39 +255,30 @@ async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-async def monday_lapse(context: ContextTypes.DEFAULT_TYPE):
-    """Auto-lapse any chores that weren't done last weekend, then reset done flags."""
-    this_sat = date.today() - timedelta(days=2)  # Monday − 2 days = Saturday
-    logger.info("monday_lapse running, this_sat=%s", this_sat)
+async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
+    """9am Mon–Fri: on Monday auto-lapse undone weekend chores, then nag daily until done."""
+    today = date.today()
+    w = today.weekday()
+    logger.info("weekday_job running on %s (weekday=%d)", today, w)
     state = load_state()
 
-    for chore in ALL_CHORES:
-        if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
-            state[f"{chore}_lapsed"] = True
-            person = _chore_person(chore, this_sat)
-            emoji = CHORE_EMOJI[chore]
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"{emoji} {chore.title()} from last weekend was never done!\n\n{person}, please do it ASAP!",
-                reply_markup=_done_keyboard(chore),
-            )
+    if w == 0:  # Monday: check last weekend and set lapse flags
+        this_sat = today - timedelta(days=2)
+        for chore in ALL_CHORES:
+            if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
+                state[f"{chore}_lapsed"] = True
+        for chore in ALL_CHORES:
+            state[f"{chore}_done"] = False
+        save_state(state)
 
-    for chore in ALL_CHORES:
-        state[f"{chore}_done"] = False
-    save_state(state)
-
-
-async def daily_lapse_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """Send daily reminders Tue–Fri for any lapsed chores."""
-    logger.info("daily_lapse_reminder running on %s", date.today())
-    state = load_state()
     for chore in ALL_CHORES:
         if state.get(f"{chore}_lapsed"):
             person = _lapsed_person(chore)
             emoji = CHORE_EMOJI[chore]
+            label = chore.title()
             await context.bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"{emoji} Reminder: {chore.title()} still not done!\n\n{person}, please get it done today!",
+                text=f"{emoji} {label} not done ah...anyhow.. {person} do it ASAP!",
                 reply_markup=_done_keyboard(chore),
             )
 
@@ -302,7 +293,7 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
         state = load_state()
         if any(state.get(f"{c}_lapsed") for c in ALL_CHORES):
             logger.info("startup_check: lapsed chores found, sending reminders")
-            await daily_lapse_reminder(context)
+            await weekday_job(context)
         return
 
     this_sat = today if w == 5 else today - timedelta(days=1)
@@ -464,8 +455,7 @@ def main():
     # days: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun  (python-telegram-bot convention)
     jq.run_daily(saturday_job,         time=time(9,  0, tzinfo=TZ), days=(5,))
     jq.run_daily(sunday_job,           time=time(9,  0, tzinfo=TZ), days=(6,))
-    jq.run_daily(monday_lapse,         time=time(7,  0, tzinfo=TZ), days=(0,))
-    jq.run_daily(daily_lapse_reminder, time=time(10, 0, tzinfo=TZ), days=(1, 2, 3, 4))
+    jq.run_daily(weekday_job,          time=time(9,  0, tzinfo=TZ), days=(0, 1, 2, 3, 4))
     jq.run_once(startup_check, when=5)
 
     logger.info("Chore bot starting...")
