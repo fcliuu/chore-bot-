@@ -47,9 +47,8 @@ def _is_bedsheets_weekend(saturday: date) -> bool:
     return delta >= 0 and delta % 14 == 0
 
 
-def _bedsheets_person(saturday: date) -> str:
-    nth = (saturday - BEDSHEETS_BASE).days // 14
-    return NAMES[nth % 2]  # biweek 0 → Alexis, biweek 1 → FC
+def _bedsheets_person(_saturday: date) -> str:
+    return "FC & Alexis"  # both wash their own bedsheets
 
 
 def _this_saturday() -> date:
