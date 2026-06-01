@@ -107,6 +107,7 @@ def load_state() -> dict:
         "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
         "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
         "last_reminder_sat": None,
+        "last_weekday_job": None,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -269,7 +270,9 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
                 state[f"{chore}_lapsed"] = True
         for chore in ALL_CHORES:
             state[f"{chore}_done"] = False
-        save_state(state)
+
+    state["last_weekday_job"] = today.isoformat()
+    save_state(state)
 
     for chore in ALL_CHORES:
         if state.get(f"{chore}_lapsed"):
@@ -288,11 +291,11 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
     w = today.weekday()
     logger.info("startup_check running, today=%s weekday=%d", today, w)
 
-    # On weekdays, just re-send lapse reminders if any chores are overdue
+    # On weekdays, run weekday_job if it hasn't fired yet today
     if w not in (5, 6):
         state = load_state()
-        if any(state.get(f"{c}_lapsed") for c in ALL_CHORES):
-            logger.info("startup_check: lapsed chores found, sending reminders")
+        if state.get("last_weekday_job") != date.today().isoformat():
+            logger.info("startup_check: weekday_job not yet run today, running now")
             await weekday_job(context)
         return
 
