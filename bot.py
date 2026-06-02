@@ -107,7 +107,8 @@ def load_state() -> dict:
         "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
         "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
         "last_reminder_sat": None,
-        "last_weekday_job": None,
+        "last_sunday_sat": None,
+        "last_lapse_sat": None,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -222,7 +223,7 @@ async def _send_weekend_reminders(context, saturday: date):
         label = chore.title()
         await context.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"{emoji} Weekend chore reminder!\n\n{person}, it's your turn to do {label}!",
+            text=f"{emoji} {person}, rmb {label}? 😏 Do it today okay!",
             reply_markup=_done_keyboard(chore),
         )
 
@@ -245,34 +246,42 @@ async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
     this_sat = date.today() - timedelta(days=1)
     logger.info("sunday_job running, this_sat=%s", this_sat)
     state = load_state()
+    state["last_sunday_sat"] = this_sat.isoformat()
+    save_state(state)
     for chore in ALL_CHORES:
         if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
             person = _chore_person(chore, this_sat)
             emoji = CHORE_EMOJI[chore]
+            label = chore.title()
             await context.bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"⚠️ {chore.title()} still not done! {person}, last chance today {emoji}",
+                text=f"{emoji} {person} still haven't done {label}! Do it today! Why push it to weekday man 😤",
                 reply_markup=_done_keyboard(chore),
             )
 
 
 async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
-    """9am Mon–Fri: on Monday auto-lapse undone weekend chores, then nag daily until done."""
+    """9am Mon–Fri: lapse undone weekend chores and nag daily until done."""
     today = date.today()
     w = today.weekday()
+    last_sat = _last_saturday()
     logger.info("weekday_job running on %s (weekday=%d)", today, w)
     state = load_state()
 
-    if w == 0:  # Monday: check last weekend and set lapse flags
-        this_sat = today - timedelta(days=2)
+    if state.get("last_lapse_sat") != last_sat.isoformat():
+        # Lapse check not yet done for this week — run it now
+        # If saturday_job was missed, done flags may be stale from a previous week
+        if state.get("last_reminder_sat") != last_sat.isoformat():
+            for chore in ALL_CHORES:
+                state[f"{chore}_done"] = False
+                state[f"{chore}_lapsed"] = False
         for chore in ALL_CHORES:
-            if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
+            if _is_chore_weekend(chore, last_sat) and not state[f"{chore}_done"]:
                 state[f"{chore}_lapsed"] = True
         for chore in ALL_CHORES:
             state[f"{chore}_done"] = False
-
-    state["last_weekday_job"] = today.isoformat()
-    save_state(state)
+        state["last_lapse_sat"] = last_sat.isoformat()
+        save_state(state)
 
     for chore in ALL_CHORES:
         if state.get(f"{chore}_lapsed"):
@@ -281,7 +290,7 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
             label = chore.title()
             await context.bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"{emoji} {label} not done ah...anyhow.. {person} do it ASAP!",
+                text=f"{emoji} {label} still not done?? {person} last chance bro 😩",
                 reply_markup=_done_keyboard(chore),
             )
 
@@ -291,28 +300,33 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
     w = today.weekday()
     logger.info("startup_check running, today=%s weekday=%d", today, w)
 
-    # On weekdays, run weekday_job if it hasn't fired yet today
     if w not in (5, 6):
+        # Weekday: run weekday_job if lapse check is pending or chores are still lapsed
         state = load_state()
-        if state.get("last_weekday_job") != date.today().isoformat():
-            logger.info("startup_check: weekday_job not yet run today, running now")
+        last_sat = _last_saturday()
+        lapse_pending = state.get("last_lapse_sat") != last_sat.isoformat()
+        reminders_pending = any(state.get(f"{c}_lapsed") for c in ALL_CHORES)
+        if lapse_pending or reminders_pending:
+            logger.info("startup_check: running weekday_job (lapse_pending=%s, reminders_pending=%s)",
+                        lapse_pending, reminders_pending)
             await weekday_job(context)
         return
 
     this_sat = today if w == 5 else today - timedelta(days=1)
     state = load_state()
 
-    if state.get("last_reminder_sat") == this_sat.isoformat():
-        logger.info("startup_check: reminders already sent for %s", this_sat)
-        return
+    if state.get("last_reminder_sat") != this_sat.isoformat():
+        logger.info("startup_check: sending missed weekend reminders for %s", this_sat)
+        for chore in ALL_CHORES:
+            state[f"{chore}_done"] = False
+            state[f"{chore}_lapsed"] = False
+        state["last_reminder_sat"] = this_sat.isoformat()
+        save_state(state)
+        await _send_weekend_reminders(context, this_sat)
 
-    logger.info("startup_check: sending missed weekend reminders for %s", this_sat)
-    for chore in ALL_CHORES:
-        state[f"{chore}_done"] = False
-        state[f"{chore}_lapsed"] = False
-    state["last_reminder_sat"] = this_sat.isoformat()
-    save_state(state)
-    await _send_weekend_reminders(context, this_sat)
+    if w == 6 and state.get("last_sunday_sat") != this_sat.isoformat():
+        logger.info("startup_check: running missed Sunday nudge for %s", this_sat)
+        await sunday_job(context)
 
 
 # ── Callback handler ──────────────────────────────────────────────────────────
