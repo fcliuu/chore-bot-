@@ -109,6 +109,7 @@ def load_state() -> dict:
         "last_reminder_sat": None,
         "last_sunday_sat": None,
         "last_lapse_sat": None,
+        "chat_id": None,
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -120,6 +121,19 @@ def load_state() -> dict:
 def save_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
+
+def _chat_id(state: dict) -> int:
+    """Effective chat for reminders: saved from commands, else hardcoded fallback."""
+    return state.get("chat_id") or CHAT_ID
+
+
+def _save_chat(state: dict, update: Update):
+    """Save the chat where a command was sent so scheduled jobs know where to push."""
+    cid = update.effective_chat.id
+    if state.get("chat_id") != cid:
+        state["chat_id"] = cid
+        save_state(state)
 
 
 # ── Message builders ──────────────────────────────────────────────────────────
@@ -214,7 +228,7 @@ def _build_chore_detail(chore: str, state: dict) -> tuple:
 
 # ── Weekend reminder sender ───────────────────────────────────────────────────
 
-async def _send_weekend_reminders(context, saturday: date):
+async def _send_weekend_reminders(context, saturday: date, chat_id: int):
     for chore in ALL_CHORES:
         if not _is_chore_weekend(chore, saturday):
             continue
@@ -222,7 +236,7 @@ async def _send_weekend_reminders(context, saturday: date):
         emoji = CHORE_EMOJI[chore]
         label = chore.title()
         await context.bot.send_message(
-            chat_id=CHAT_ID,
+            chat_id=chat_id,
             text=f"{emoji} {person}, rmb {label}? 😏 Do it today okay!",
             reply_markup=_done_keyboard(chore),
         )
@@ -239,7 +253,7 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
         state[f"{chore}_lapsed"] = False
     state["last_reminder_sat"] = today.isoformat()
     save_state(state)
-    await _send_weekend_reminders(context, today)
+    await _send_weekend_reminders(context, today, _chat_id(state))
 
 
 async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
@@ -248,13 +262,14 @@ async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     state["last_sunday_sat"] = this_sat.isoformat()
     save_state(state)
+    chat_id = _chat_id(state)
     for chore in ALL_CHORES:
         if _is_chore_weekend(chore, this_sat) and not state[f"{chore}_done"]:
             person = _chore_person(chore, this_sat)
             emoji = CHORE_EMOJI[chore]
             label = chore.title()
             await context.bot.send_message(
-                chat_id=CHAT_ID,
+                chat_id=chat_id,
                 text=f"{emoji} {person} still haven't done {label}! Do it today! Why push it to weekday man 😤",
                 reply_markup=_done_keyboard(chore),
             )
@@ -267,6 +282,7 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
     last_sat = _last_saturday()
     logger.info("weekday_job running on %s (weekday=%d)", today, w)
     state = load_state()
+    chat_id = _chat_id(state)
 
     if state.get("last_lapse_sat") != last_sat.isoformat():
         # Lapse check not yet done for this week — run it now
@@ -289,7 +305,7 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
             emoji = CHORE_EMOJI[chore]
             label = chore.title()
             await context.bot.send_message(
-                chat_id=CHAT_ID,
+                chat_id=chat_id,
                 text=f"{emoji} {label} still not done?? {person} last chance bro 😩",
                 reply_markup=_done_keyboard(chore),
             )
@@ -314,6 +330,7 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
 
     this_sat = today if w == 5 else today - timedelta(days=1)
     state = load_state()
+    chat_id = _chat_id(state)
 
     if state.get("last_reminder_sat") != this_sat.isoformat():
         logger.info("startup_check: sending missed weekend reminders for %s", this_sat)
@@ -322,11 +339,22 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
             state[f"{chore}_lapsed"] = False
         state["last_reminder_sat"] = this_sat.isoformat()
         save_state(state)
-        await _send_weekend_reminders(context, this_sat)
+        await _send_weekend_reminders(context, this_sat, chat_id)
 
     if w == 6 and state.get("last_sunday_sat") != this_sat.isoformat():
         logger.info("startup_check: running missed Sunday nudge for %s", this_sat)
         await sunday_job(context)
+
+
+async def _trigger_lapse(context: ContextTypes.DEFAULT_TYPE, state: dict):
+    """Called from commands: if chores are overdue, send reminders immediately."""
+    if date.today().weekday() in (5, 6):
+        return
+    last_sat = _last_saturday()
+    lapse_pending = state.get("last_lapse_sat") != last_sat.isoformat()
+    reminders_pending = any(state.get(f"{c}_lapsed") for c in ALL_CHORES)
+    if lapse_pending or reminders_pending:
+        await weekday_job(context)
 
 
 # ── Callback handler ──────────────────────────────────────────────────────────
@@ -413,35 +441,50 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = load_state()
+    _save_chat(state, update)
+    await _trigger_lapse(context, state)
     await update.message.reply_text(
         "👋 Chore bot is running!\n\nUse /status to see all chores, "
         "or use /mopping, /toilet, /bedsheets for individual chore details."
     )
 
 
-async def status(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    text, markup = _build_main_menu(state)
+    _save_chat(state, update)
+    await _trigger_lapse(context, state)
+    text, markup = _build_main_menu(load_state())
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def cmd_mopping(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def cmd_mopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    text, markup = _build_chore_detail("mopping", state)
+    _save_chat(state, update)
+    await _trigger_lapse(context, state)
+    text, markup = _build_chore_detail("mopping", load_state())
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def cmd_toilet(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def cmd_toilet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    text, markup = _build_chore_detail("toilet", state)
+    _save_chat(state, update)
+    await _trigger_lapse(context, state)
+    text, markup = _build_chore_detail("toilet", load_state())
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def cmd_bedsheets(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def cmd_bedsheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
-    text, markup = _build_chore_detail("bedsheets", state)
+    _save_chat(state, update)
+    await _trigger_lapse(context, state)
+    text, markup = _build_chore_detail("bedsheets", load_state())
     await update.message.reply_text(text, reply_markup=markup)
+
+
+async def error_handler(_update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception", exc_info=context.error)
 
 
 # ── Bot setup ─────────────────────────────────────────────────────────────────
@@ -467,6 +510,7 @@ def main():
     app.add_handler(CommandHandler("toilet",    cmd_toilet))
     app.add_handler(CommandHandler("bedsheets", cmd_bedsheets))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_error_handler(error_handler)
 
     jq = app.job_queue
     # days: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun  (python-telegram-bot convention)
