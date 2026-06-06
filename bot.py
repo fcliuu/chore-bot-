@@ -107,6 +107,7 @@ def load_state() -> dict:
         "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
         "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
         "last_reminder_sat": None,
+        "last_reminder_chat": None,
         "last_sunday_sat": None,
         "last_lapse_sat": None,
         "chat_id": None,
@@ -251,9 +252,11 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
     for chore in ALL_CHORES:
         state[f"{chore}_done"] = False
         state[f"{chore}_lapsed"] = False
+    chat_id = _chat_id(state)
     state["last_reminder_sat"] = today.isoformat()
+    state["last_reminder_chat"] = chat_id
     save_state(state)
-    await _send_weekend_reminders(context, today, _chat_id(state))
+    await _send_weekend_reminders(context, today, chat_id)
 
 
 async def sunday_job(context: ContextTypes.DEFAULT_TYPE):
@@ -332,12 +335,13 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     chat_id = _chat_id(state)
 
-    if state.get("last_reminder_sat") != this_sat.isoformat():
-        logger.info("startup_check: sending missed weekend reminders for %s", this_sat)
+    if state.get("last_reminder_sat") != this_sat.isoformat() or state.get("last_reminder_chat") != chat_id:
+        logger.info("startup_check: sending missed weekend reminders for %s to %s", this_sat, chat_id)
         for chore in ALL_CHORES:
             state[f"{chore}_done"] = False
             state[f"{chore}_lapsed"] = False
         state["last_reminder_sat"] = this_sat.isoformat()
+        state["last_reminder_chat"] = chat_id
         save_state(state)
         await _send_weekend_reminders(context, this_sat, chat_id)
 
@@ -347,13 +351,38 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _trigger_lapse(context: ContextTypes.DEFAULT_TYPE, state: dict):
-    """Called from commands: if chores are overdue, send reminders immediately."""
-    if date.today().weekday() in (5, 6):
+    """Called from commands: send any pending reminders to the correct chat immediately."""
+    today = date.today()
+    w = today.weekday()
+    chat_id = _chat_id(state)
+
+    if w == 5:  # Saturday — re-send if not yet delivered to this chat
+        if state.get("last_reminder_chat") != chat_id:
+            for chore in ALL_CHORES:
+                if _is_chore_weekend(chore, today) and not state[f"{chore}_done"]:
+                    person = _chore_person(chore, today)
+                    emoji = CHORE_EMOJI[chore]
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"{emoji} {person}, rmb {chore.title()}? 😏 Do it today okay!",
+                        reply_markup=_done_keyboard(chore),
+                    )
+            state["last_reminder_chat"] = chat_id
+            save_state(state)
         return
+
+    if w == 6:
+        return
+
+    # Weekday: lapse check pending, catch-up for mis-missed lapses, or reminders outstanding
     last_sat = _last_saturday()
     lapse_pending = state.get("last_lapse_sat") != last_sat.isoformat()
+    catch_up = any(
+        _is_chore_weekend(c, last_sat) and not state[f"{c}_done"] and not state.get(f"{c}_lapsed")
+        for c in ALL_CHORES
+    )
     reminders_pending = any(state.get(f"{c}_lapsed") for c in ALL_CHORES)
-    if lapse_pending or reminders_pending:
+    if lapse_pending or catch_up or reminders_pending:
         await weekday_job(context)
 
 
