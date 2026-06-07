@@ -11,7 +11,7 @@ logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=loggin
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8756258315:AAH0caCOy4MQkG-jUMdPMmeyoJv9k0GeQjY"
-CHAT_ID = 4985901416
+CHAT_ID = -4985901416
 TZ = ZoneInfo("Asia/Singapore")
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
