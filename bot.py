@@ -24,6 +24,17 @@ BEDSHEETS_BASE = date(2026, 5, 16)  # biweek 0: Alexis washes bedsheets
 CHORE_EMOJI = {"mopping": "🧹", "toilet": "🚽", "bedsheets": "🛏"}
 ALL_CHORES = ("mopping", "toilet", "bedsheets")
 
+MOPPING_ROOMS = [
+    ("master",    "Master Bedroom"),
+    ("alexis_fc", "Alexis & FC Bedroom"),
+    ("study",     "Study Room"),
+    ("living",    "Living Room"),
+    ("balcony1",  "Balcony 1"),
+    ("balcony2",  "Balcony 2"),
+    ("kitchen",   "Kitchen"),
+]
+_MOPPING_ROOM_KEYS = [k for k, _ in MOPPING_ROOMS]
+
 
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
@@ -106,6 +117,7 @@ def load_state() -> dict:
     defaults = {
         "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
         "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
+        "mopping_rooms": {key: False for key in _MOPPING_ROOM_KEYS},
         "last_reminder_sat": None,
         "last_reminder_chat": None,
         "last_sunday_sat": None,
@@ -116,6 +128,8 @@ def load_state() -> dict:
         with open(STATE_FILE) as f:
             saved = json.load(f)
         defaults.update(saved)
+        for key in _MOPPING_ROOM_KEYS:
+            defaults["mopping_rooms"].setdefault(key, False)
     return defaults
 
 
@@ -140,7 +154,31 @@ def _save_chat(state: dict, update: Update):
 # ── Message builders ──────────────────────────────────────────────────────────
 
 def _done_keyboard(chore: str) -> InlineKeyboardMarkup:
+    if chore == "mopping":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Done!", callback_data="done_mopping")],
+            [InlineKeyboardButton("🔸 Not completely done", callback_data="partial_mopping")],
+        ])
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done!", callback_data=f"done_{chore}")]])
+
+
+def _build_mopping_rooms_text(rooms: dict) -> str:
+    lines = ["🧹 Mopping — tick off each room as you go:\n"]
+    for key, label in MOPPING_ROOMS:
+        mark = "✅" if rooms.get(key) else "☐"
+        lines.append(f"{mark} {label}")
+    done_count = sum(1 for key in _MOPPING_ROOM_KEYS if rooms.get(key))
+    lines.append(f"\n{done_count}/{len(MOPPING_ROOMS)} rooms done")
+    return "\n".join(lines)
+
+
+def _mopping_rooms_keyboard(rooms: dict) -> InlineKeyboardMarkup:
+    buttons = []
+    for key, label in MOPPING_ROOMS:
+        mark = "✅" if rooms.get(key) else "☐"
+        buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"room_mopping_{key}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="rooms_back_mopping")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def _build_main_menu(state: dict) -> tuple:
@@ -214,8 +252,10 @@ def _build_chore_detail(chore: str, state: dict) -> tuple:
         else:
             buttons = [
                 [InlineKeyboardButton("✅ Mark Done", callback_data=f"update_done_{chore}")],
-                [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")],
             ]
+            if chore == "mopping":
+                buttons.append([InlineKeyboardButton("🔸 Not completely done", callback_data="partial_mopping")])
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu_main")])
     else:
         next_sat = this_sat + timedelta(weeks=1)
         while not _is_chore_weekend(chore, next_sat):
@@ -252,6 +292,7 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
     for chore in ALL_CHORES:
         state[f"{chore}_done"] = False
         state[f"{chore}_lapsed"] = False
+    state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
     chat_id = _chat_id(state)
     state["last_reminder_sat"] = today.isoformat()
     state["last_reminder_chat"] = chat_id
@@ -294,11 +335,13 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
             for chore in ALL_CHORES:
                 state[f"{chore}_done"] = False
                 state[f"{chore}_lapsed"] = False
+            state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
         for chore in ALL_CHORES:
             if _is_chore_weekend(chore, last_sat) and not state[f"{chore}_done"]:
                 state[f"{chore}_lapsed"] = True
         for chore in ALL_CHORES:
             state[f"{chore}_done"] = False
+        state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
         state["last_lapse_sat"] = last_sat.isoformat()
         save_state(state)
 
@@ -340,6 +383,7 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
         for chore in ALL_CHORES:
             state[f"{chore}_done"] = False
             state[f"{chore}_lapsed"] = False
+        state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
         state["last_reminder_sat"] = this_sat.isoformat()
         state["last_reminder_chat"] = chat_id
         save_state(state)
@@ -403,6 +447,34 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             text, markup = _build_main_menu(state)
         else:
             text, markup = _build_chore_detail(chore, state)
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    # ── Mopping room breakdown ────────────────────────────────────────────────
+    if data == "partial_mopping":
+        rooms = state.get("mopping_rooms", {})
+        await query.edit_message_text(_build_mopping_rooms_text(rooms), reply_markup=_mopping_rooms_keyboard(rooms))
+        return
+
+    if data.startswith("room_mopping_"):
+        room_key = data[len("room_mopping_"):]
+        rooms = state.setdefault("mopping_rooms", {key: False for key in _MOPPING_ROOM_KEYS})
+        rooms[room_key] = not rooms.get(room_key, False)
+        if all(rooms.get(k) for k in _MOPPING_ROOM_KEYS):
+            state["mopping_done"] = True
+            state["mopping_lapsed"] = False
+            save_state(state)
+            await query.edit_message_text(
+                f"✅ Thanks {name}! 🧹 Mopping done! All rooms ticked off 🎉",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Undo", callback_data="undo_mopping")]]),
+            )
+        else:
+            save_state(state)
+            await query.edit_message_text(_build_mopping_rooms_text(rooms), reply_markup=_mopping_rooms_keyboard(rooms))
+        return
+
+    if data == "rooms_back_mopping":
+        text, markup = _build_chore_detail("mopping", state)
         await query.edit_message_text(text, reply_markup=markup)
         return
 
