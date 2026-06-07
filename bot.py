@@ -512,6 +512,10 @@ async def cmd_bedsheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=markup)
 
 
+async def chatid(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"This chat's ID is: `{update.effective_chat.id}`", parse_mode="Markdown")
+
+
 async def error_handler(_update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Unhandled exception", exc_info=context.error)
 
@@ -538,6 +542,7 @@ def main():
     app.add_handler(CommandHandler("mopping",   cmd_mopping))
     app.add_handler(CommandHandler("toilet",    cmd_toilet))
     app.add_handler(CommandHandler("bedsheets", cmd_bedsheets))
+    app.add_handler(CommandHandler("chatid",    chatid))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
 
