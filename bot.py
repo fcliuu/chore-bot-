@@ -429,42 +429,6 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
         await sunday_job(context)
 
 
-async def _trigger_lapse(context: ContextTypes.DEFAULT_TYPE, state: dict):
-    """Called from commands: send any pending reminders to the correct chat immediately."""
-    today = date.today()
-    w = today.weekday()
-    chat_id = _chat_id(state)
-
-    if w == 5:  # Saturday — re-send if not yet delivered to this chat
-        if state.get("last_reminder_chat") != chat_id:
-            for chore in ALL_CHORES:
-                if _is_chore_weekend(chore, today) and not state[f"{chore}_done"]:
-                    person = _chore_person(chore, today)
-                    emoji = CHORE_EMOJI[chore]
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"{emoji} {person}, rmb {chore.title()}? 😏 Do it today okay!",
-                        reply_markup=_done_keyboard(chore),
-                    )
-            state["last_reminder_chat"] = chat_id
-            save_state(state)
-        return
-
-    if w == 6:
-        return
-
-    # Weekday: lapse check pending, catch-up for mis-missed lapses, or reminders outstanding
-    last_sat = _last_saturday()
-    lapse_pending = state.get("last_lapse_sat") != last_sat.isoformat()
-    catch_up = any(
-        _is_chore_weekend(c, last_sat) and not state[f"{c}_done"] and not state.get(f"{c}_lapsed")
-        for c in ALL_CHORES
-    )
-    reminders_pending = any(state.get(f"{c}_lapsed") for c in ALL_CHORES)
-    if lapse_pending or catch_up or reminders_pending:
-        await weekday_job(context)
-
-
 # ── Callback handler ──────────────────────────────────────────────────────────
 
 async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
@@ -605,45 +569,40 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     _save_chat(state, update)
-    await _trigger_lapse(context, state)
     await update.message.reply_text(
         "👋 Chore bot is running!\n\nUse /status to see all chores, "
         "or use /mopping, /toilet, /bedsheets for individual chore details."
     )
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     _save_chat(state, update)
-    await _trigger_lapse(context, state)
-    text, markup = _build_main_menu(load_state())
+    text, markup = _build_main_menu(state)
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def cmd_mopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_mopping(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     _save_chat(state, update)
-    await _trigger_lapse(context, state)
-    text, markup = _build_chore_detail("mopping", load_state())
+    text, markup = _build_chore_detail("mopping", state)
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def cmd_toilet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_toilet(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     _save_chat(state, update)
-    await _trigger_lapse(context, state)
-    text, markup = _build_chore_detail("toilet", load_state())
+    text, markup = _build_chore_detail("toilet", state)
     await update.message.reply_text(text, reply_markup=markup)
 
 
-async def cmd_bedsheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_bedsheets(update: Update, _context: ContextTypes.DEFAULT_TYPE):
     state = load_state()
     _save_chat(state, update)
-    await _trigger_lapse(context, state)
-    text, markup = _build_chore_detail("bedsheets", load_state())
+    text, markup = _build_chore_detail("bedsheets", state)
     await update.message.reply_text(text, reply_markup=markup)
 
 
