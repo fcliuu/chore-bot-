@@ -392,44 +392,6 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-async def startup_check(context: ContextTypes.DEFAULT_TYPE):
-    today = date.today()
-    w = today.weekday()
-    logger.info("startup_check running, today=%s weekday=%d", today, w)
-
-    if w not in (5, 6):
-        # Weekday: run weekday_job if lapse check is pending or chores are still lapsed
-        state = load_state()
-        last_sat = _last_saturday()
-        lapse_pending = state.get("last_lapse_sat") != last_sat.isoformat()
-        reminders_pending = any(state.get(f"{c}_lapsed") for c in ALL_CHORES)
-        if lapse_pending or reminders_pending:
-            logger.info("startup_check: running weekday_job (lapse_pending=%s, reminders_pending=%s)",
-                        lapse_pending, reminders_pending)
-            await weekday_job(context)
-        return
-
-    this_sat = today if w == 5 else today - timedelta(days=1)
-    state = load_state()
-    chat_id = _chat_id(state)
-
-    if state.get("last_reminder_sat") != this_sat.isoformat() or state.get("last_reminder_chat") != chat_id:
-        logger.info("startup_check: sending missed weekend reminders for %s to %s", this_sat, chat_id)
-        for chore in ALL_CHORES:
-            state[f"{chore}_done"] = False
-            state[f"{chore}_lapsed"] = False
-        state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
-        state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
-        state["last_reminder_sat"] = this_sat.isoformat()
-        state["last_reminder_chat"] = chat_id
-        save_state(state)
-        await _send_weekend_reminders(context, this_sat, chat_id)
-
-    if w == 6 and state.get("last_sunday_sat") != this_sat.isoformat():
-        logger.info("startup_check: running missed Sunday nudge for %s", this_sat)
-        await sunday_job(context)
-
-
 # ── Callback handler ──────────────────────────────────────────────────────────
 
 async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
@@ -646,7 +608,6 @@ def main():
     jq.run_daily(saturday_job,         time=time(9,  0, tzinfo=TZ), days=(5,))
     jq.run_daily(sunday_job,           time=time(9,  0, tzinfo=TZ), days=(6,))
     jq.run_daily(weekday_job,          time=time(9,  0, tzinfo=TZ), days=(0, 1, 2, 3, 4))
-    jq.run_once(startup_check, when=5)
 
     logger.info("Chore bot starting...")
     app.run_polling()
