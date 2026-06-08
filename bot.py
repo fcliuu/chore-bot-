@@ -39,6 +39,7 @@ TOILET_TASKS = [
     ("wash",    "Washing the toilet"),
     ("scrub",   "Scrubbing the toilet bowl"),
     ("mirrors", "Wiping the 2 mirrors"),
+    ("hair",    "Pick up hair"),
 ]
 _TOILET_TASK_KEYS = [k for k, _ in TOILET_TASKS]
 
