@@ -35,6 +35,13 @@ MOPPING_ROOMS = [
 ]
 _MOPPING_ROOM_KEYS = [k for k, _ in MOPPING_ROOMS]
 
+TOILET_TASKS = [
+    ("wash",    "Washing the toilet"),
+    ("scrub",   "Scrubbing the toilet bowl"),
+    ("mirrors", "Wiping the 2 mirrors"),
+]
+_TOILET_TASK_KEYS = [k for k, _ in TOILET_TASKS]
+
 
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
@@ -118,6 +125,7 @@ def load_state() -> dict:
         "mopping_done": False,   "toilet_done": False,   "bedsheets_done": False,
         "mopping_lapsed": False, "toilet_lapsed": False, "bedsheets_lapsed": False,
         "mopping_rooms": {key: False for key in _MOPPING_ROOM_KEYS},
+        "toilet_tasks": {key: False for key in _TOILET_TASK_KEYS},
         "last_reminder_sat": None,
         "last_reminder_chat": None,
         "last_sunday_sat": None,
@@ -130,6 +138,8 @@ def load_state() -> dict:
         defaults.update(saved)
         for key in _MOPPING_ROOM_KEYS:
             defaults["mopping_rooms"].setdefault(key, False)
+        for key in _TOILET_TASK_KEYS:
+            defaults["toilet_tasks"].setdefault(key, False)
     return defaults
 
 
@@ -154,10 +164,10 @@ def _save_chat(state: dict, update: Update):
 # ── Message builders ──────────────────────────────────────────────────────────
 
 def _done_keyboard(chore: str) -> InlineKeyboardMarkup:
-    if chore == "mopping":
+    if chore in ("mopping", "toilet"):
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Done!", callback_data="done_mopping")],
-            [InlineKeyboardButton("🔸 Not completely done", callback_data="partial_mopping")],
+            [InlineKeyboardButton("✅ Done!", callback_data=f"done_{chore}")],
+            [InlineKeyboardButton("🔸 Not completely done", callback_data=f"partial_{chore}")],
         ])
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done!", callback_data=f"done_{chore}")]])
 
@@ -178,6 +188,25 @@ def _mopping_rooms_keyboard(rooms: dict) -> InlineKeyboardMarkup:
         mark = "✅" if rooms.get(key) else "☐"
         buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"room_mopping_{key}")])
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="rooms_back_mopping")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _build_toilet_tasks_text(tasks: dict) -> str:
+    lines = ["🚽 Toilet — tick off each task as you go:\n"]
+    for key, label in TOILET_TASKS:
+        mark = "✅" if tasks.get(key) else "☐"
+        lines.append(f"{mark} {label}")
+    done_count = sum(1 for key in _TOILET_TASK_KEYS if tasks.get(key))
+    lines.append(f"\n{done_count}/{len(TOILET_TASKS)} tasks done")
+    return "\n".join(lines)
+
+
+def _toilet_tasks_keyboard(tasks: dict) -> InlineKeyboardMarkup:
+    buttons = []
+    for key, label in TOILET_TASKS:
+        mark = "✅" if tasks.get(key) else "☐"
+        buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"task_toilet_{key}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="tasks_back_toilet")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -238,8 +267,10 @@ def _build_chore_detail(chore: str, state: dict) -> tuple:
         lines.append(f"⚠️ OVERDUE from last weekend — {person}, please do it ASAP!")
         buttons = [
             [InlineKeyboardButton("✅ Done! (clear overdue)", callback_data=f"update_done_{chore}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu_main")],
         ]
+        if chore in ("mopping", "toilet"):
+            buttons.append([InlineKeyboardButton("🔸 Not completely done", callback_data=f"partial_{chore}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu_main")])
     elif _is_chore_weekend(chore, this_sat):
         person = _chore_person(chore, this_sat)
         status = "✅ Done this weekend!" if done else f"❌ Not done yet — {person}'s turn"
@@ -253,8 +284,8 @@ def _build_chore_detail(chore: str, state: dict) -> tuple:
             buttons = [
                 [InlineKeyboardButton("✅ Mark Done", callback_data=f"update_done_{chore}")],
             ]
-            if chore == "mopping":
-                buttons.append([InlineKeyboardButton("🔸 Not completely done", callback_data="partial_mopping")])
+            if chore in ("mopping", "toilet"):
+                buttons.append([InlineKeyboardButton("🔸 Not completely done", callback_data=f"partial_{chore}")])
             buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu_main")])
     else:
         next_sat = this_sat + timedelta(weeks=1)
@@ -293,6 +324,7 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
         state[f"{chore}_done"] = False
         state[f"{chore}_lapsed"] = False
     state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
+    state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
     chat_id = _chat_id(state)
     state["last_reminder_sat"] = today.isoformat()
     state["last_reminder_chat"] = chat_id
@@ -336,12 +368,14 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
                 state[f"{chore}_done"] = False
                 state[f"{chore}_lapsed"] = False
             state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
+            state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
         for chore in ALL_CHORES:
             if _is_chore_weekend(chore, last_sat) and not state[f"{chore}_done"]:
                 state[f"{chore}_lapsed"] = True
         for chore in ALL_CHORES:
             state[f"{chore}_done"] = False
         state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
+        state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
         state["last_lapse_sat"] = last_sat.isoformat()
         save_state(state)
 
@@ -384,6 +418,7 @@ async def startup_check(context: ContextTypes.DEFAULT_TYPE):
             state[f"{chore}_done"] = False
             state[f"{chore}_lapsed"] = False
         state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
+        state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
         state["last_reminder_sat"] = this_sat.isoformat()
         state["last_reminder_chat"] = chat_id
         save_state(state)
@@ -475,6 +510,34 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
 
     if data == "rooms_back_mopping":
         text, markup = _build_chore_detail("mopping", state)
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    # ── Toilet task breakdown ─────────────────────────────────────────────────
+    if data == "partial_toilet":
+        tasks = state.get("toilet_tasks", {})
+        await query.edit_message_text(_build_toilet_tasks_text(tasks), reply_markup=_toilet_tasks_keyboard(tasks))
+        return
+
+    if data.startswith("task_toilet_"):
+        task_key = data[len("task_toilet_"):]
+        tasks = state.setdefault("toilet_tasks", {key: False for key in _TOILET_TASK_KEYS})
+        tasks[task_key] = not tasks.get(task_key, False)
+        if all(tasks.get(k) for k in _TOILET_TASK_KEYS):
+            state["toilet_done"] = True
+            state["toilet_lapsed"] = False
+            save_state(state)
+            await query.edit_message_text(
+                f"✅ Thanks {name}! 🚽 Toilet done! All tasks ticked off 🎉",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Undo", callback_data="undo_toilet")]]),
+            )
+        else:
+            save_state(state)
+            await query.edit_message_text(_build_toilet_tasks_text(tasks), reply_markup=_toilet_tasks_keyboard(tasks))
+        return
+
+    if data == "tasks_back_toilet":
+        text, markup = _build_chore_detail("toilet", state)
         await query.edit_message_text(text, reply_markup=markup)
         return
 
