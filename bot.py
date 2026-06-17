@@ -14,7 +14,8 @@ BOT_TOKEN = "8756258315:AAH0caCOy4MQkG-jUMdPMmeyoJv9k0GeQjY"
 CHAT_ID = -4985901416
 TZ = ZoneInfo("Asia/Singapore")
 
-STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+_STATE_DIR = "/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(_STATE_DIR, "state.json")
 
 NAMES = ["Alexis", "FC"]
 MOPPING_BASE   = date(2026, 5, 9)   # week 0: Alexis mops
