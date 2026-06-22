@@ -239,8 +239,26 @@ def _build_main_menu(state: dict) -> tuple:
         [InlineKeyboardButton("🧹 Mopping", callback_data="menu_mopping")],
         [InlineKeyboardButton("🚽 Toilet", callback_data="menu_toilet")],
         [InlineKeyboardButton("🛏 Bedsheets", callback_data="menu_bedsheets")],
+        [InlineKeyboardButton("📅 Past Weeks", callback_data="menu_history")],
     ])
     return text, keyboard
+
+
+def _build_history_text() -> str:
+    this_sat = _this_saturday()
+    lines = ["📅 Past 8 Weeks\n"]
+    for i in range(1, 9):
+        sat = this_sat - timedelta(weeks=i)
+        due = [chore for chore in ALL_CHORES if _is_chore_weekend(chore, sat)]
+        lines.append(f"🗓 Sat {_fmt(sat)}:")
+        for chore in due:
+            person = _chore_person(chore, sat)
+            emoji = CHORE_EMOJI[chore]
+            lines.append(f"  {emoji} {chore.title()}: {person}")
+        if not due:
+            lines.append("  (no chores due)")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _build_chore_detail(chore: str, state: dict) -> tuple:
@@ -418,6 +436,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chore = data[5:]
         if chore == "main":
             text, markup = _build_main_menu(state)
+        elif chore == "history":
+            text = _build_history_text()
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]])
         else:
             text, markup = _build_chore_detail(chore, state)
         await query.edit_message_text(text, reply_markup=markup)
