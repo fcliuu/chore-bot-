@@ -358,12 +358,15 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
     today = date.today()
     w = today.weekday()
     last_sat = _last_saturday()
-    logger.info("weekday_job running on %s (weekday=%d)", today, w)
+    days_since_sat = (today - last_sat).days
+    logger.info("weekday_job running on %s (weekday=%d, days_since_sat=%d)", today, w, days_since_sat)
     state = load_state()
     chat_id = _chat_id(state)
 
-    if state.get("last_lapse_sat") != last_sat.isoformat():
-        # Lapse check not yet done for this week — run it now
+    # Only run the lapse-check within Mon/Tue (days 2–3 after Saturday).
+    # This prevents a container restart mid-week from wiping state.json and
+    # re-lapsing chores the user already marked done.
+    if state.get("last_lapse_sat") != last_sat.isoformat() and days_since_sat <= 3:
         # If saturday_job was missed, done flags may be stale from a previous week
         if state.get("last_reminder_sat") != last_sat.isoformat():
             for chore in ALL_CHORES:
@@ -395,7 +398,14 @@ async def weekday_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Callback handler ──────────────────────────────────────────────────────────
 
-async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+async def _push_dashboard(bot, state):
+    """Send the chore dashboard to the group chat after a Done action."""
+    chat_id = _chat_id(state)
+    text, markup = _build_main_menu(state)
+    await bot.send_message(chat_id, text, reply_markup=markup)
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -431,6 +441,7 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Thanks {name}! 🧹 Mopping done! All rooms ticked off 🎉",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Undo", callback_data="undo_mopping")]]),
             )
+            await _push_dashboard(context.bot, state)
         else:
             save_state(state)
             await query.edit_message_text(_build_mopping_rooms_text(rooms), reply_markup=_mopping_rooms_keyboard(rooms))
@@ -459,6 +470,7 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Thanks {name}! 🚽 Toilet done! All tasks ticked off 🎉",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Undo", callback_data="undo_toilet")]]),
             )
+            await _push_dashboard(context.bot, state)
         else:
             save_state(state)
             await query.edit_message_text(_build_toilet_tasks_text(tasks), reply_markup=_toilet_tasks_keyboard(tasks))
@@ -506,6 +518,7 @@ async def callback_handler(update: Update, _context: ContextTypes.DEFAULT_TYPE):
             # From status/detail → refresh detail view
             text, markup = _build_chore_detail(chore, state)
             await query.edit_message_text(text, reply_markup=markup)
+        await _push_dashboard(context.bot, state)
 
     # ── Undo ──────────────────────────────────────────────────────────────────
     elif action == "undo":
