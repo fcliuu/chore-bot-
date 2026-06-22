@@ -621,7 +621,7 @@ def main():
     # days: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri 5=Sat 6=Sun  (python-telegram-bot convention)
     jq.run_daily(saturday_job,         time=time(9,  0, tzinfo=TZ), days=(5,))
     jq.run_daily(sunday_job,           time=time(9,  0, tzinfo=TZ), days=(6,))
-    jq.run_daily(weekday_job,          time=time(9,  0, tzinfo=TZ), days=(0, 1, 2, 3, 4))
+    jq.run_daily(weekday_job,          time=time(9,  0, tzinfo=TZ), days=(0, 1, 2, 3))    # Mon–Thu only
 
     logger.info("Chore bot starting...")
     app.run_polling()
