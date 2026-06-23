@@ -133,6 +133,7 @@ def load_state() -> dict:
         "last_sunday_sat": None,
         "last_lapse_sat": None,
         "chat_id": None,
+        "history": {},  # {sat_isoformat: {chore: True/False}}
     }
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
@@ -244,21 +245,32 @@ def _build_main_menu(state: dict) -> tuple:
     return text, keyboard
 
 
-def _build_history_text() -> str:
+def _build_history(state: dict) -> tuple:
     this_sat = _this_saturday()
+    history = state.get("history", {})
     lines = ["📅 Past 8 Weeks\n"]
+    buttons = []
     for i in range(1, 9):
         sat = this_sat - timedelta(weeks=i)
+        sat_key = sat.isoformat()
         due = [chore for chore in ALL_CHORES if _is_chore_weekend(chore, sat)]
         lines.append(f"🗓 Sat {_fmt(sat)}:")
         for chore in due:
             person = _chore_person(chore, sat)
             emoji = CHORE_EMOJI[chore]
-            lines.append(f"  {emoji} {chore.title()}: {person}")
+            done = history.get(sat_key, {}).get(chore, False)
+            mark = "✅" if done else "❌"
+            lines.append(f"  {mark} {emoji} {chore.title()}: {person}")
+            if not done:
+                buttons.append([InlineKeyboardButton(
+                    f"✅ Mark done — {emoji} {chore.title()} ({_fmt(sat)})",
+                    callback_data=f"hist_done_{sat_key}_{chore}",
+                )])
         if not due:
             lines.append("  (no chores due)")
         lines.append("")
-    return "\n".join(lines).rstrip()
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu_main")])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(buttons)
 
 
 def _build_chore_detail(chore: str, state: dict) -> tuple:
@@ -341,10 +353,13 @@ async def saturday_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("saturday_job running for %s", today)
     state = load_state()
     for chore in ALL_CHORES:
-        state[f"{chore}_done"] = False
-        state[f"{chore}_lapsed"] = False
-    state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
-    state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
+        # Keep lapsed chores lapsed — user must mark done before the slate clears
+        if not state.get(f"{chore}_lapsed"):
+            state[f"{chore}_done"] = False
+            if chore == "mopping":
+                state["mopping_rooms"] = {key: False for key in _MOPPING_ROOM_KEYS}
+            if chore == "toilet":
+                state["toilet_tasks"] = {key: False for key in _TOILET_TASK_KEYS}
     chat_id = _chat_id(state)
     state["last_reminder_sat"] = today.isoformat()
     state["last_reminder_chat"] = chat_id
@@ -437,10 +452,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chore == "main":
             text, markup = _build_main_menu(state)
         elif chore == "history":
-            text = _build_history_text()
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_main")]])
+            text, markup = _build_history(state)
         else:
             text, markup = _build_chore_detail(chore, state)
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    # ── History: mark past week done ─────────────────────────────────────────
+    if data.startswith("hist_done_"):
+        sat_key, chore = data[len("hist_done_"):].rsplit("_", 1)
+        history = state.setdefault("history", {})
+        history.setdefault(sat_key, {})[chore] = True
+        # If this is the most recent lapsed chore, clear the lapse too
+        if sat_key == _last_saturday().isoformat() and state.get(f"{chore}_lapsed"):
+            state[f"{chore}_lapsed"] = False
+        save_state(state)
+        text, markup = _build_history(state)
         await query.edit_message_text(text, reply_markup=markup)
         return
 
@@ -457,6 +484,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if all(rooms.get(k) for k in _MOPPING_ROOM_KEYS):
             state["mopping_done"] = True
             state["mopping_lapsed"] = False
+            sat_key = _this_saturday().isoformat()
+            state.setdefault("history", {}).setdefault(sat_key, {})["mopping"] = True
             save_state(state)
             await query.edit_message_text(
                 f"✅ Thanks {name}! 🧹 Mopping done! All rooms ticked off 🎉",
@@ -486,6 +515,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if all(tasks.get(k) for k in _TOILET_TASK_KEYS):
             state["toilet_done"] = True
             state["toilet_lapsed"] = False
+            sat_key = _this_saturday().isoformat()
+            state.setdefault("history", {}).setdefault(sat_key, {})["toilet"] = True
             save_state(state)
             await query.edit_message_text(
                 f"✅ Thanks {name}! 🚽 Toilet done! All tasks ticked off 🎉",
@@ -524,6 +555,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         state[done_key]   = True
         state[lapsed_key] = False
+        # Record in history — lapsed chores belong to last Saturday, else this Saturday
+        sat_key = (_last_saturday() if state.get(lapsed_key) else _this_saturday()).isoformat()
+        state.setdefault("history", {}).setdefault(sat_key, {})[chore] = True
         save_state(state)
 
         if action == "done":
